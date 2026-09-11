@@ -1,0 +1,250 @@
+name: Multi-Platform Release Matrix
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version_tag:
+        description: "Release Tag (e.g. v1.0.0)"
+        required: true
+        default: "v1.0.0"
+
+permissions:
+  contents: write
+
+jobs:
+  # =========================================================================
+  # 1. Build Standalone Windows Binary (.exe)
+  # =========================================================================
+  build-windows:
+    name: Build Windows Executable
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Compile Windows standalone executable
+        run: |
+          pyinstaller --noconfirm --onefile --windowed --name sha256-duplicate-finder-windows-x86_64 --collect-all customtkinter sha256_duplicate_finder.py
+
+      - name: Upload Windows binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-binary
+          path: dist/sha256-duplicate-finder-windows-x86_64.exe
+          if-no-files-found: error
+
+  # =========================================================================
+  # 2. Build Standalone Linux Binary (.tar.gz)
+  # =========================================================================
+  build-linux:
+    name: Build Linux Binary
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install system dependencies (Tkinter & X11 headers)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Compile Linux standalone executable
+        run: |
+          pyinstaller --noconfirm --onefile --name sha256-duplicate-finder-linux-x86_64 --collect-all customtkinter sha256_duplicate_finder.py
+          chmod +x dist/sha256-duplicate-finder-linux-x86_64
+          tar -czvf sha256-duplicate-finder-linux-x86_64.tar.gz -C dist sha256-duplicate-finder-linux-x86_64
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-binary
+          path: sha256-duplicate-finder-linux-x86_64.tar.gz
+          if-no-files-found: error
+
+  # =========================================================================
+  # 3. Build Standalone macOS Binary (.tar.gz)
+  # =========================================================================
+  build-macos:
+    name: Build macOS Binary
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Compile macOS standalone executable
+        run: |
+          pyinstaller --noconfirm --onefile --windowed --name sha256-duplicate-finder-macos --collect-all customtkinter sha256_duplicate_finder.py
+          chmod +x dist/sha256-duplicate-finder-macos
+          tar -czvf sha256-duplicate-finder-macos.tar.gz -C dist sha256-duplicate-finder-macos
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-binary
+          path: sha256-duplicate-finder-macos.tar.gz
+          if-no-files-found: error
+
+  # =========================================================================
+  # 4. Build Universal Wheel & Android Termux Distribution
+  # =========================================================================
+  build-universal-and-android:
+    name: Build Universal Wheel & Android Termux Package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install packaging tools
+        run: |
+          python -m pip install --upgrade pip build
+
+      - name: Build universal wheel and sdist
+        run: |
+          python -m build
+
+      - name: Package Android Termux Bundle
+        run: |
+          tar -czvf sha256-duplicate-finder-android-termux.tar.gz \
+            sha256_duplicate_finder.py \
+            termux_installer.sh \
+            requirements.txt \
+            README.md \
+            LICENSE
+
+      - name: Upload Universal and Android artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: universal-and-android
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+            sha256-duplicate-finder-android-termux.tar.gz
+          if-no-files-found: error
+
+  # =========================================================================
+  # 5. Aggregate Artifacts, Calculate SHA-256 Checksums, and Publish Release
+  # =========================================================================
+  publish-release:
+    name: Publish Multi-Platform GitHub Release
+    needs: [build-windows, build-linux, build-macos, build-universal-and-android]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create release assets directory
+        run: mkdir -p release-assets
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-binary
+          path: release-assets/
+
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-binary
+          path: release-assets/
+
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-binary
+          path: release-assets/
+
+      - name: Download Universal & Android artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: universal-and-android
+          path: release-assets/
+
+      - name: Generate SHA-256 Checksums
+        working-directory: release-assets
+        run: |
+          sha256sum * > checksums.txt
+          cat checksums.txt
+
+      - name: Determine Release Tag
+        id: get_tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.version_tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.get_tag.outputs.tag }}
+          name: "Release ${{ steps.get_tag.outputs.tag }}"
+          body: |
+            ## 🚀 SHA-256 Duplicate File Finder & Safe Organizer (${{ steps.get_tag.outputs.tag }})
+
+            High-performance cross-platform duplicate file finder and safe storage organizer supporting **Windows, macOS, Linux, and Android**.
+
+            ### 📦 Release Assets & Downloads
+            | Platform | File | Description |
+            |---|---|---|
+            | 🪟 **Windows** | `sha256-duplicate-finder-windows-x86_64.exe` | Standalone portable executable (GUI & CLI) |
+            | 🐧 **Linux** | `sha256-duplicate-finder-linux-x86_64.tar.gz` | Standalone Linux binary (x86_64) |
+            | 🍎 **macOS** | `sha256-duplicate-finder-macos.tar.gz` | Standalone macOS application / binary |
+            | 📱 **Android** | `sha256-duplicate-finder-android-termux.tar.gz` | Automated Termux installer & CLI bundle |
+            | 🐍 **Python / PyPI** | `*.whl` / `*.tar.gz` | Universal Python package |
+            | 🔐 **Security** | `checksums.txt` | Cryptographic SHA-256 integrity verification |
+
+            ### ⚡ Key Capabilities
+            - **3-Tier Progressive Scanning**: Instant size grouping -> 64KB Head/Tail partial hash -> Full 4MB-chunked SHA-256 verification.
+            - **HDD Low-Thrashing Protection**: Dedicated 2-thread sequential mode for external drives and USB backup disks.
+            - **Safe Retention Policies**: `Keep Oldest`, `Keep Newest`, `Keep Shortest Path`, `Keep First`.
+            - **Dual Mode Interface**: Modern CustomTkinter dark/light GUI + headless scriptable CLI.
+            - **Safe Deletion**: Default Dry-Run mode, system Trash/Recycle Bin support, and read-only attribute handling.
+          files: |
+            release-assets/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

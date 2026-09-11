@@ -1,0 +1,75 @@
+[build-system]
+requires = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sha256-duplicate-finder"
+version = "1.0.0"
+description = "High-performance cross-platform duplicate file finder and safe organizer (Windows, macOS, Linux, Android) featuring 3-tier progressive filtering and smart retention policies."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [
+    { name = "abusuraihsakhri" }
+]
+keywords = [
+    "duplicate-finder",
+    "sha256",
+    "xxhash",
+    "cross-platform",
+    "customtkinter",
+    "cli",
+    "android-termux",
+    "storage-cleaner"
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Environment :: MacOS X",
+    "Environment :: Win32 (MS Windows)",
+    "Environment :: X11 Applications",
+    "Intended Audience :: End Users/Desktop",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Android",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Filesystems",
+    "Topic :: Utilities"
+]
+dependencies = [
+    "customtkinter>=5.2.0",
+    "send2trash>=1.8.0",
+    "xxhash>=3.0.0"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pyinstaller>=6.0.0",
+    "build>=1.0.0"
+]
+
+[project.scripts]
+sha256-dup-finder = "sha256_duplicate_finder:main"
+
+[project.urls]
+Homepage = "https://github.com/abusuraihsakhri/sha256-duplicate-finder"
+Repository = "https://github.com/abusuraihsakhri/sha256-duplicate-finder"
+Issues = "https://github.com/abusuraihsakhri/sha256-duplicate-finder/issues"
+
+[tool.setuptools]
+py-modules = ["sha256_duplicate_finder"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
