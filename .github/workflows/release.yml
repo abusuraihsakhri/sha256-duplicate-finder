@@ -144,11 +144,12 @@ jobs:
 
       - name: Build universal wheel and sdist
         run: |
-          python -m build
+          mkdir -p dist-packages
+          python -m build --outdir dist-packages
 
       - name: Package Android Termux Bundle
         run: |
-          tar -czvf sha256-duplicate-finder-android-termux.tar.gz \
+          tar -czvf dist-packages/sha256-duplicate-finder-android-termux.tar.gz \
             sha256_duplicate_finder.py \
             termux_installer.sh \
             requirements.txt \
@@ -159,10 +160,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: universal-and-android
-          path: |
-            dist/*.whl
-            dist/*.tar.gz
-            sha256-duplicate-finder-android-termux.tar.gz
+          path: dist-packages/*
           if-no-files-found: error
 
   # =========================================================================
@@ -203,9 +201,14 @@ jobs:
           name: universal-and-android
           path: release-assets/
 
-      - name: Generate SHA-256 Checksums
+      - name: Flatten assets and generate SHA-256 Checksums
         working-directory: release-assets
         run: |
+          # Move any nested files up to release-assets root
+          find . -mindepth 2 -type f -exec mv -t . {} +
+          # Remove any empty subdirectories
+          find . -mindepth 1 -type d -empty -delete
+          # Compute cryptographic SHA-256 checksums
           sha256sum * > checksums.txt
           cat checksums.txt
 
