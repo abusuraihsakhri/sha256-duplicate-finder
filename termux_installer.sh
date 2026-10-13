@@ -35,10 +35,9 @@ python3 -m pip install xxhash || echo "[WARN] xxhash is unavailable; the built-i
 
 # 4. Create convenient 'dup-finder' alias in user path
 PREFIX_BIN="/data/data/com.termux/files/usr/bin"
-cat << EOF > "$PREFIX_BIN/dup-finder"
-#!/data/data/com.termux/files/usr/bin/bash
-exec python3 "$SCRIPT_PATH" "\$@"
-EOF
+# Quote the script path as a shell argument, including spaces and metacharacters.
+printf -v quoted_script '%q' "$SCRIPT_PATH"
+printf '#!/data/data/com.termux/files/usr/bin/bash\nexec python3 %s "$@"\n' "$quoted_script" > "$PREFIX_BIN/dup-finder"
 
 chmod +x "$PREFIX_BIN/dup-finder"
 
