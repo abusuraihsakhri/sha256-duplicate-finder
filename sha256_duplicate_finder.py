@@ -79,6 +79,10 @@ except Exception as _gui_err:
     GUI_AVAILABLE = False
     GUI_ERROR_MSG = str(_gui_err)
 
+if GUI_AVAILABLE and sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+    GUI_AVAILABLE = False
+    GUI_ERROR_MSG = "No X11 display is configured"
+
 
 # ---------------------------------------------------------------------------
 # Core Utilities & Safe Deletion
@@ -138,7 +142,9 @@ def force_delete_file(p: Path) -> tuple[bool, str]:
             return True, "Already removed"
 
         # Protection: Never delete a directory directly via force_delete_file
-        if p.is_dir() and not p.is_symlink():
+        if p.is_symlink():
+            return False, "Symbolic links cannot be permanently deleted by this operation."
+        if p.is_dir():
             return False, "Target is a directory, not a file. Deletion refused for safety."
 
         # Step 1: Remove read-only attribute via chmod
@@ -171,15 +177,12 @@ def move_to_trash(p: Path) -> tuple[bool, str]:
         if not p.exists() and not p.is_symlink():
             return True, "Already removed"
 
-        if p.is_dir() and not p.is_symlink():
+        if p.is_symlink():
+            return False, "Symbolic links are not supported by the safe removal workflow."
+        if p.is_dir():
             return False, "Target is a directory, not a file."
 
-        # Clear read-only flags first
-        try:
-            os.chmod(p, stat.S_IWRITE | stat.S_IREAD)
-        except Exception:
-            pass
-
+        # Trash operations do not require modifying file permissions.
         send2trash.send2trash(str(p))
         return True, "Moved to Trash"
     except Exception as e:
@@ -548,6 +551,7 @@ if GUI_AVAILABLE:
             self.duplicate_groups: list[list[Path]] = []
             self.file_info: dict[Path, tuple[int, float, str]] = {}
             self.scanning = False
+            self.scan_failed = False
 
             self._build_ui()
             if initial_paths:
@@ -819,6 +823,7 @@ if GUI_AVAILABLE:
                 return
 
             self.scanning = True
+            self.scan_failed = False
             self.stop_event.clear()
             self.scan_btn.configure(state="disabled")
             self.stop_btn.configure(state="normal")
@@ -864,6 +869,7 @@ if GUI_AVAILABLE:
                         self.file_info = meta
                         self._populate_tree()
                     elif msg_type == "error":
+                        self.scan_failed = True
                         self._log(f"Scan error: {data}")
                     elif msg_type == "done":
                         self.status_label.configure(text=data)
@@ -871,7 +877,8 @@ if GUI_AVAILABLE:
                         self.scanning = False
                         self.scan_btn.configure(state="normal")
                         self.stop_btn.configure(state="disabled")
-                        self.progress.set(1.0)
+                        if not self.scan_failed:
+                            self.progress.set(1.0)
             except queue.Empty:
                 pass
             self.after(100, self._poll_queue)
