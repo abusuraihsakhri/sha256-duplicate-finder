@@ -215,6 +215,15 @@ def remove_verified_duplicate(
     def signature(st):
         return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
 
+    def opened_file_matches(opened, pathname_stat):
+        # On Windows, os.fstat() can report different/zero inode information.
+        return (
+            (opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
+            == (pathname_stat.st_size, pathname_stat.st_mtime_ns, pathname_stat.st_ctime_ns)
+            and (os.name == "nt"
+                 or (opened.st_dev, opened.st_ino) == (pathname_stat.st_dev, pathname_stat.st_ino))
+        )
+
     try:
         snapshots = {}
         for path in (keeper, target):
@@ -223,11 +232,11 @@ def remove_verified_duplicate(
                 return False, f"Refused: not an unchanged regular file: {path}"
             digest = hashlib.sha256()
             with path.open("rb") as handle:
-                if signature(os.fstat(handle.fileno())) != signature(initial):
+                if not opened_file_matches(os.fstat(handle.fileno()), initial):
                     return False, f"Refused: file changed before verification: {path}"
                 for block in iter(lambda: handle.read(4 * 1024 * 1024), b""):
                     digest.update(block)
-                if signature(os.fstat(handle.fileno())) != signature(initial):
+                if not opened_file_matches(os.fstat(handle.fileno()), initial):
                     return False, f"Refused: file changed during verification: {path}"
             if signature(path.stat()) != signature(initial) or digest.hexdigest() != expected_digest:
                 return False, f"Refused: file changed since scanning: {path}"
@@ -300,6 +309,9 @@ class DuplicateScannerEngine:
             total_bytes = 0
 
             def file_identity(st, path):
+                # DirEntry.stat() does not populate file IDs on Windows.
+                if os.name == "nt" and not st.st_ino:
+                    st = os.stat(path)
                 return (st.st_dev, st.st_ino) if st.st_ino else str(path.resolve())
 
             def scan_dir(dir_path: Path):
