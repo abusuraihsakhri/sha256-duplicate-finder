@@ -5,6 +5,14 @@
 # ==============================================================================
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_PATH="$SCRIPT_DIR/sha256_duplicate_finder.py"
+if [ ! -f "$SCRIPT_PATH" ]; then
+    echo "[ERROR] sha256_duplicate_finder.py not found beside installer."
+    echo "Clone the repository and run bash termux_installer.sh from that checkout."
+    exit 1
+fi
+
 echo "============================================================"
 echo " SHA-256 Duplicate File Finder - Android Termux Setup"
 echo "============================================================"
@@ -23,13 +31,10 @@ pkg install -y python clang libffi
 
 # 3. Install dependencies
 echo "[*] Installing dependencies..."
-python3 -m pip install --upgrade pip
-python3 -m pip install xxhash send2trash || python3 -m pip install send2trash
+python3 -m pip install xxhash || echo "[WARN] xxhash is unavailable; the built-in SHA-256 fallback remains usable."
 
 # 4. Create convenient 'dup-finder' alias in user path
 PREFIX_BIN="/data/data/com.termux/files/usr/bin"
-SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/sha256_duplicate_finder.py"
-
 cat << EOF > "$PREFIX_BIN/dup-finder"
 #!/data/data/com.termux/files/usr/bin/bash
 exec python3 "$SCRIPT_PATH" "\$@"
@@ -41,6 +46,7 @@ echo "============================================================"
 echo "[SUCCESS] Installation Complete!"
 echo "You can now run 'dup-finder' from any directory in Termux."
 echo ""
+echo "Note: system Trash support is not included in this Termux installer."
 echo "Example Usage:"
 echo "  dup-finder ~/storage/shared/Download --cli --min-size-kb 1024"
 echo "  dup-finder ~/storage/shared/DCIM --cli --dry-run"
