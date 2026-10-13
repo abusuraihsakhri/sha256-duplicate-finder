@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import os
 import queue
 import stat
@@ -33,7 +34,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 __app_name__ = "SHA-256 Duplicate File Finder & Safe Organizer"
 
 # ---------------------------------------------------------------------------
@@ -77,6 +78,10 @@ try:
 except Exception as _gui_err:
     GUI_AVAILABLE = False
     GUI_ERROR_MSG = str(_gui_err)
+
+if GUI_AVAILABLE and sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+    GUI_AVAILABLE = False
+    GUI_ERROR_MSG = "No X11 display is configured"
 
 
 # ---------------------------------------------------------------------------
@@ -137,7 +142,9 @@ def force_delete_file(p: Path) -> tuple[bool, str]:
             return True, "Already removed"
 
         # Protection: Never delete a directory directly via force_delete_file
-        if p.is_dir() and not p.is_symlink():
+        if p.is_symlink():
+            return False, "Symbolic links cannot be permanently deleted by this operation."
+        if p.is_dir():
             return False, "Target is a directory, not a file. Deletion refused for safety."
 
         # Step 1: Remove read-only attribute via chmod
@@ -170,19 +177,82 @@ def move_to_trash(p: Path) -> tuple[bool, str]:
         if not p.exists() and not p.is_symlink():
             return True, "Already removed"
 
-        if p.is_dir() and not p.is_symlink():
+        if p.is_symlink():
+            return False, "Symbolic links are not supported by the safe removal workflow."
+        if p.is_dir():
             return False, "Target is a directory, not a file."
 
-        # Clear read-only flags first
-        try:
-            os.chmod(p, stat.S_IWRITE | stat.S_IREAD)
-        except Exception:
-            pass
-
+        # Trash operations do not require modifying file permissions.
         send2trash.send2trash(str(p))
         return True, "Moved to Trash"
     except Exception as e:
         return False, str(e)
+
+
+def remove_verified_duplicate(
+    target: Path,
+    keeper: Path,
+    file_meta: dict[Path, tuple[int, float, str]],
+    to_trash: bool = False,
+) -> tuple[bool, str]:
+    """Reverify both copies before any destructive action.
+
+    Refuse missing, changed, symlinked, or non-regular files. Both copies must
+    still match their scan-time SHA-256 and size, and must be distinct inodes.
+    """
+    import hashlib
+
+    if target == keeper or target.is_symlink() or keeper.is_symlink():
+        return False, "Refused: identical path or symbolic link"
+
+    if target not in file_meta or keeper not in file_meta:
+        return False, "Refused: file is absent from the verified scan results"
+
+    expected_size, _, expected_digest = file_meta[keeper]
+    if (file_meta[target][0], file_meta[target][2]) != (expected_size, expected_digest):
+        return False, "Refused: scan metadata differs between copies"
+
+    def signature(st):
+        return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+    def opened_file_matches(opened, pathname_stat):
+        # On Windows, os.fstat() can report different/zero inode information.
+        return (
+            (opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
+            == (pathname_stat.st_size, pathname_stat.st_mtime_ns, pathname_stat.st_ctime_ns)
+            and (os.name == "nt"
+                 or (opened.st_dev, opened.st_ino) == (pathname_stat.st_dev, pathname_stat.st_ino))
+        )
+
+    try:
+        snapshots = {}
+        for path in (keeper, target):
+            initial = path.stat()
+            if not stat.S_ISREG(initial.st_mode) or initial.st_size != expected_size:
+                return False, f"Refused: not an unchanged regular file: {path}"
+            digest = hashlib.sha256()
+            with path.open("rb") as handle:
+                if not opened_file_matches(os.fstat(handle.fileno()), initial):
+                    return False, f"Refused: file changed before verification: {path}"
+                for block in iter(lambda: handle.read(4 * 1024 * 1024), b""):
+                    digest.update(block)
+                if not opened_file_matches(os.fstat(handle.fileno()), initial):
+                    return False, f"Refused: file changed during verification: {path}"
+            if signature(path.stat()) != signature(initial) or digest.hexdigest() != expected_digest:
+                return False, f"Refused: file changed since scanning: {path}"
+            snapshots[path] = signature(initial)
+
+        if snapshots[keeper][:2] == snapshots[target][:2] and snapshots[keeper][1] != 0:
+            return False, "Refused: both paths refer to the same physical file"
+
+        # A final pathname check narrows the race between verification and removal.
+        if any(path.is_symlink() or signature(path.stat()) != snapshots[path]
+               for path in (keeper, target)):
+            return False, "Refused: file changed before removal"
+    except (OSError, ValueError) as exc:
+        return False, f"Refused: could not reverify files: {exc}"
+
+    return move_to_trash(target) if to_trash else force_delete_file(target)
 
 
 # ---------------------------------------------------------------------------
@@ -215,6 +285,7 @@ class DuplicateScannerEngine:
         # Results
         self.duplicate_groups: list[list[Path]] = []
         self.file_meta: dict[Path, tuple[int, float, str]] = {}  # path -> (size, mtime, digest)
+        self.error: Optional[str] = None
 
     def _emit(self, msg_type: str, data):
         if self.msg_queue:
@@ -223,20 +294,36 @@ class DuplicateScannerEngine:
             self.progress_callback(msg_type, data)
 
     def run(self):
+        self.duplicate_groups = []
+        self.file_meta = {}
+        self.error = None
         try:
             # ----------------------------------------------------
             # Phase 1: Rapid Size Indexing via os.scandir
             # ----------------------------------------------------
             self._emit("phase", ("Phase 1/3: Scanning directories & indexing file sizes...", 0.0))
             size_map = defaultdict(list)
+            seen_directories = set()
+            seen_files = set()
             total_files = 0
             total_bytes = 0
+
+            def file_identity(st, path):
+                # DirEntry.stat() does not populate file IDs on Windows.
+                if os.name == "nt" and not st.st_ino:
+                    st = os.stat(path)
+                return (st.st_dev, st.st_ino) if st.st_ino else str(path.resolve())
 
             def scan_dir(dir_path: Path):
                 nonlocal total_files, total_bytes
                 if self.stop_event.is_set():
                     return
                 try:
+                    directory_stat = dir_path.stat()
+                    identity = file_identity(directory_stat, dir_path)
+                    if identity in seen_directories:
+                        return
+                    seen_directories.add(identity)
                     with os.scandir(dir_path) as iterator:
                         for entry in iterator:
                             if self.stop_event.is_set():
@@ -250,6 +337,10 @@ class DuplicateScannerEngine:
                                     st = entry.stat(follow_symlinks=self.follow_symlinks)
                                     if st.st_size >= self.min_size_bytes:
                                         p = Path(entry.path)
+                                        identity = file_identity(st, p)
+                                        if identity in seen_files:
+                                            continue
+                                        seen_files.add(identity)
                                         size_map[st.st_size].append(p)
                                         total_files += 1
                                         total_bytes += st.st_size
@@ -272,6 +363,10 @@ class DuplicateScannerEngine:
                     try:
                         st = root.stat()
                         if st.st_size >= self.min_size_bytes:
+                            identity = file_identity(st, root)
+                            if identity in seen_files:
+                                continue
+                            seen_files.add(identity)
                             size_map[st.st_size].append(root)
                             total_files += 1
                             total_bytes += st.st_size
@@ -283,7 +378,7 @@ class DuplicateScannerEngine:
                 return
 
             candidates = {sz: paths for sz, paths in size_map.items() if len(paths) > 1}
-            del size_map
+            size_map.clear()
 
             total_candidates = sum(len(paths) for paths in candidates.values())
             if not candidates:
@@ -303,12 +398,20 @@ class DuplicateScannerEngine:
                 import hashlib
                 path_obj, sz = item
                 try:
+                    before = path_obj.stat()
+                    if before.st_size != sz:
+                        return None
                     with open(path_obj, "rb") as f:
                         head = f.read(65536)
                         tail = b""
                         if sz > 131072:
                             f.seek(-65536, os.SEEK_END)
                             tail = f.read(65536)
+                    after = path_obj.stat()
+                    if (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+                        after.st_size, after.st_mtime_ns, after.st_ctime_ns
+                    ):
+                        return None
                     data = head + tail
                     digest = xxhash.xxh64(data).hexdigest() if HAS_XXHASH else hashlib.sha256(data).hexdigest()
                     return (path_obj, sz, digest)
@@ -335,7 +438,8 @@ class DuplicateScannerEngine:
             # ----------------------------------------------------
             # Phase 3: Full SHA-256 Hashing on Confirmed Matches
             # ----------------------------------------------------
-            full_candidates = [p for paths in partial_map.values() if len(paths) > 1 for p in paths]
+            full_candidates = [(p, sz) for (sz, _), paths in partial_map.items()
+                               if len(paths) > 1 for p in paths]
             if not full_candidates:
                 self._emit("done", "No duplicate files found after partial hash filter.")
                 return
@@ -347,23 +451,31 @@ class DuplicateScannerEngine:
 
             READ_BUFFER_SIZE = 4 * 1024 * 1024  # 4MB chunk buffer for optimal I/O
 
-            def calc_full_sha256(p: Path):
+            def calc_full_sha256(item):
                 import hashlib
+                p, expected_size = item
                 try:
+                    before = p.stat()
+                    if before.st_size != expected_size:
+                        return None
                     h = hashlib.sha256()
                     with open(p, "rb", buffering=READ_BUFFER_SIZE) as f:
                         while chunk := f.read(READ_BUFFER_SIZE):
                             h.update(chunk)
-                    st = p.stat()
-                    return (p, h.hexdigest(), st.st_size, st.st_mtime)
-                except Exception:
+                    after = p.stat()
+                    if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+                        after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns
+                    ):
+                        return None
+                    return (p, h.hexdigest(), after.st_size, after.st_mtime)
+                except OSError:
                     return None
 
             hash_map = defaultdict(list)
             file_meta = {}
 
             with ThreadPoolExecutor(max_workers=self.workers) as ex:
-                futures = {ex.submit(calc_full_sha256, p): p for p in full_candidates}
+                futures = {ex.submit(calc_full_sha256, item): item for item in full_candidates}
                 done_count = 0
                 total_f = len(full_candidates)
                 for fut in as_completed(futures):
@@ -377,7 +489,7 @@ class DuplicateScannerEngine:
                         self._emit("progress", done_count / total_f)
                     if res:
                         p, digest, sz, mtime = res
-                        hash_map[digest].append(p)
+                        hash_map[(sz, digest)].append(p)
                         file_meta[p] = (sz, mtime, digest)
 
             final_groups = []
@@ -398,7 +510,9 @@ class DuplicateScannerEngine:
             )
 
         except Exception as e:
-            self._emit("done", f"Error during scan: {e}")
+            self.error = str(e)
+            self._emit("error", self.error)
+            self._emit("done", f"Scan failed: {e}")
 
     @staticmethod
     def partition_group(
@@ -449,6 +563,7 @@ if GUI_AVAILABLE:
             self.duplicate_groups: list[list[Path]] = []
             self.file_info: dict[Path, tuple[int, float, str]] = {}
             self.scanning = False
+            self.scan_failed = False
 
             self._build_ui()
             if initial_paths:
@@ -715,8 +830,12 @@ if GUI_AVAILABLE:
             except ValueError:
                 messagebox.showerror("Invalid Parameters", "Min Size and Thread count must be valid numbers.")
                 return
+            if not math.isfinite(min_kb) or min_kb < 0 or workers < 1:
+                messagebox.showerror("Invalid Parameters", "Minimum size must be finite and nonnegative; threads must be positive.")
+                return
 
             self.scanning = True
+            self.scan_failed = False
             self.stop_event.clear()
             self.scan_btn.configure(state="disabled")
             self.stop_btn.configure(state="normal")
@@ -761,13 +880,17 @@ if GUI_AVAILABLE:
                         self.duplicate_groups = groups
                         self.file_info = meta
                         self._populate_tree()
+                    elif msg_type == "error":
+                        self.scan_failed = True
+                        self._log(f"Scan error: {data}")
                     elif msg_type == "done":
                         self.status_label.configure(text=data)
                         self._log(data)
                         self.scanning = False
                         self.scan_btn.configure(state="normal")
                         self.stop_btn.configure(state="disabled")
-                        self.progress.set(1.0)
+                        if not self.scan_failed:
+                            self.progress.set(1.0)
             except queue.Empty:
                 pass
             self.after(100, self._poll_queue)
@@ -826,7 +949,7 @@ if GUI_AVAILABLE:
                         )
                         to_delete.extend(dups)
 
-            if not to_delete and self.duplicate_groups:
+            if not to_delete and not selected_items and self.duplicate_groups:
                 if messagebox.askyesno(
                     "Process All Duplicates?",
                     f"No specific rows selected.\n\nDo you want to process ALL {sum(len(g)-1 for g in self.duplicate_groups)} duplicate files across {len(self.duplicate_groups)} groups?"
@@ -844,6 +967,19 @@ if GUI_AVAILABLE:
                     unique_to_delete.append(p)
 
             return unique_to_delete
+
+        def _remove_verified(self, target: Path, to_trash: bool) -> tuple[bool, str]:
+            policy = self.retention_options.get(self.retention_var.get(), "oldest")
+            for group in self.duplicate_groups:
+                if target in group:
+                    keeper, duplicates = DuplicateScannerEngine.partition_group(
+                        group, self.file_info, policy=policy
+                    )
+                    if target in duplicates:
+                        return remove_verified_duplicate(
+                            target, keeper, self.file_info, to_trash=to_trash
+                        )
+            return False, "Refused: target is not a removable duplicate"
 
         def _delete_selected(self):
             to_delete = self._get_files_to_remove()
@@ -876,7 +1012,7 @@ if GUI_AVAILABLE:
             deleted_paths = []
 
             for p in to_delete:
-                success, msg = force_delete_file(p)
+                success, msg = self._remove_verified(p, to_trash=False)
                 if success:
                     deleted_count += 1
                     deleted_paths.append(p)
@@ -932,7 +1068,7 @@ if GUI_AVAILABLE:
             trashed_paths = []
 
             for p in to_trash:
-                success, msg = move_to_trash(p)
+                success, msg = self._remove_verified(p, to_trash=True)
                 if success:
                     trashed_count += 1
                     trashed_paths.append(p)
@@ -1108,8 +1244,12 @@ def run_cli(args: argparse.Namespace) -> int:
 
     engine.run()
 
+    if engine.error is not None:
+        print(f"[ERROR] Scan failed: {engine.error}", file=sys.stderr)
+        return 1
+
     if not engine.duplicate_groups:
-        print("\n[SUCCESS] No duplicates found. Your storage is clean!")
+        print("\n[SUCCESS] No duplicates found among readable, eligible files.")
         return 0
 
     print(f"\n{'='*59}")
@@ -1149,10 +1289,12 @@ def run_cli(args: argparse.Namespace) -> int:
 
     # Process deletions / trash if specified
     if args.delete or args.trash:
-        all_to_remove: list[Path] = []
+        all_to_remove: list[tuple[Path, Path]] = []
         for group in engine.duplicate_groups:
-            _, dups = DuplicateScannerEngine.partition_group(group, engine.file_meta, policy=args.retention)
-            all_to_remove.extend(dups)
+            keeper, dups = DuplicateScannerEngine.partition_group(
+                group, engine.file_meta, policy=args.retention
+            )
+            all_to_remove.extend((duplicate, keeper) for duplicate in dups)
 
         if args.dry_run:
             action_name = "Trash" if args.trash else "Permanent Deletion"
@@ -1171,11 +1313,10 @@ def run_cli(args: argparse.Namespace) -> int:
 
         success_count = 0
         failed_count = 0
-        for p in all_to_remove:
-            if args.trash:
-                ok, err = move_to_trash(p)
-            else:
-                ok, err = force_delete_file(p)
+        for p, keeper in all_to_remove:
+            ok, err = remove_verified_duplicate(
+                p, keeper, engine.file_meta, to_trash=args.trash
+            )
 
             if ok:
                 success_count += 1
@@ -1184,7 +1325,9 @@ def run_cli(args: argparse.Namespace) -> int:
                 print(f"[FAIL] {p}: {err}", file=sys.stderr)
 
         verb = "moved to trash" if args.trash else "permanently deleted"
-        print(f"\n[SUCCESS] Successfully {verb} {success_count:,} duplicate files. (Failed: {failed_count})")
+        print(f"\n[*] Successfully {verb} {success_count:,} duplicate files. (Failed: {failed_count})")
+        if failed_count:
+            return 1
 
     return 0
 
@@ -1214,7 +1357,16 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--export-csv", type=str, default="", help="Path to export CSV duplicate analysis report.")
     parser.add_argument("--export-json", type=str, default="", help="Path to export JSON duplicate analysis report.")
     parser.add_argument("--version", "-v", action="version", version=f"%(prog)s {__version__}")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if not math.isfinite(args.min_size_kb) or args.min_size_kb < 0:
+        parser.error("--min-size-kb must be finite and nonnegative")
+    if args.workers is not None and args.workers < 1:
+        parser.error("--workers must be positive")
+    if args.delete and args.trash:
+        parser.error("--delete and --trash are mutually exclusive")
+    if args.gui and (args.cli or args.delete or args.trash or args.export_csv or args.export_json):
+        parser.error("--gui cannot be combined with CLI operations")
+    return args
 
 
 def main():

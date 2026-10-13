@@ -9,10 +9,10 @@ on:
       version_tag:
         description: "Release Tag (e.g. v1.0.0)"
         required: true
-        default: "v1.0.0"
+        default: "v1.0.1"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   # =========================================================================
@@ -23,10 +23,10 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: "pip"
@@ -56,10 +56,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: "pip"
@@ -96,10 +96,10 @@ jobs:
     runs-on: macos-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: "pip"
@@ -131,10 +131,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -170,9 +170,11 @@ jobs:
     name: Publish Multi-Platform GitHub Release
     needs: [build-windows, build-linux, build-macos, build-universal-and-android]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Create release assets directory
         run: mkdir -p release-assets
@@ -214,12 +216,20 @@ jobs:
 
       - name: Determine Release Tag
         id: get_tag
+        env:
+          REQUESTED_TAG: ${{ github.event.inputs.version_tag }}
+        shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=${{ github.event.inputs.version_tag }}" >> $GITHUB_OUTPUT
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            tag="$REQUESTED_TAG"
           else
-            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+            tag="$GITHUB_REF_NAME"
           fi
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9._-]+)?$ ]]; then
+            echo "Invalid release tag: $tag" >&2
+            exit 1
+          fi
+          printf 'tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

@@ -6,7 +6,7 @@ organizer supporting Windows, macOS, Linux, and Android (Termux).
 
 QUICK START (WINDOWS)
 ---------------------
-1. Make sure Python 3.8+ is installed (https://www.python.org/downloads/)
+1. Make sure Python 3.9+ is installed (https://www.python.org/downloads/)
    IMPORTANT: Check "Add Python to PATH" during install.
 
 2. Double-click "Run_SHA256_Duplicate_Finder.bat"
@@ -26,7 +26,9 @@ chmod +x run_finder.sh
 QUICK START (ANDROID / TERMUX)
 ------------------------------
 Run in Termux:
-curl -sSL https://raw.githubusercontent.com/abusuraihsakhri/sha256-duplicate-finder/main/termux_installer.sh | bash
+git clone https://github.com/abusuraihsakhri/sha256-duplicate-finder.git
+cd sha256-duplicate-finder
+bash termux_installer.sh
 
 CLI MODE
 --------

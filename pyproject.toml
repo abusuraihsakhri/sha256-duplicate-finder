@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sha256-duplicate-finder"
-version = "1.0.0"
+version = "1.0.1"
 description = "High-performance cross-platform duplicate file finder and safe organizer (Windows, macOS, Linux, Android) featuring 3-tier progressive filtering and smart retention policies."
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [
     { name = "abusuraihsakhri" }
@@ -37,7 +37,6 @@ classifiers = [
     "Operating System :: MacOS",
     "Operating System :: Android",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
