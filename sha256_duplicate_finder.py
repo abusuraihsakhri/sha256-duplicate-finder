@@ -366,7 +366,7 @@ class DuplicateScannerEngine:
                 return
 
             candidates = {sz: paths for sz, paths in size_map.items() if len(paths) > 1}
-            del size_map
+            size_map.clear()
 
             total_candidates = sum(len(paths) for paths in candidates.values())
             if not candidates:
