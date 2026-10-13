@@ -34,7 +34,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 __app_name__ = "SHA-256 Duplicate File Finder & Safe Organizer"
 
 # ---------------------------------------------------------------------------
