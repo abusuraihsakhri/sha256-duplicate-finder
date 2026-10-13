@@ -42,6 +42,15 @@ jobs:
         run: |
           python -m py_compile sha256_duplicate_finder.py
 
+      - name: Lint for critical Python errors
+        run: |
+          python -m ruff check --select E4,E7,E9,F63,F7,F82 .
+
       - name: Run test suite with pytest
         run: |
           pytest -v --tb=short
+
+      - name: Verify distribution builds
+        if: runner.os == 'Linux' && matrix.python-version == '3.12'
+        run: |
+          python -m build
