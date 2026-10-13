@@ -12,7 +12,7 @@ on:
         default: "v1.0.0"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   # =========================================================================
@@ -170,6 +170,8 @@ jobs:
     name: Publish Multi-Platform GitHub Release
     needs: [build-windows, build-linux, build-macos, build-universal-and-android]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -214,12 +216,20 @@ jobs:
 
       - name: Determine Release Tag
         id: get_tag
+        env:
+          REQUESTED_TAG: ${{ github.event.inputs.version_tag }}
+        shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=${{ github.event.inputs.version_tag }}" >> $GITHUB_OUTPUT
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            tag="$REQUESTED_TAG"
           else
-            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+            tag="$GITHUB_REF_NAME"
           fi
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9._-]+)?$ ]]; then
+            echo "Invalid release tag: $tag" >&2
+            exit 1
+          fi
+          printf 'tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
